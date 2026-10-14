@@ -119,7 +119,9 @@ def time_shifted_surrogate(
 
 
 def benjamini_hochberg(
-    p_values: npt.NDArray, alpha: float = 0.05
+    p_values: npt.NDArray,
+    alpha: float = 0.05,
+    mask: npt.NDArray | None = None,
 ) -> tuple[npt.NDArray, float]:
     """Control the false discovery rate across a family of p-values.
 
@@ -134,6 +136,13 @@ def benjamini_hochberg(
         array of p-values, of any shape
     alpha : float
         target false discovery rate
+    mask : numpy.ndarray of bool, optional
+        when given, only entries where ``mask`` is ``True`` form the family of
+        hypotheses: the family size ``n`` counts them alone, and no entry outside
+        the mask is ever called significant. Use it to drop the diagonal of a
+        p-value matrix, whose self-pairs carry no hypothesis -- counting them
+        would inflate ``n`` (to ``m**2`` rather than ``m*(m-1)``) and stiffen the
+        correction by ``m / (m - 1)``. Must match the shape of ``p_values``.
 
     Returns
     -------
@@ -141,18 +150,33 @@ def benjamini_hochberg(
         boolean mask matching the input shape, and the largest p-value called
         significant, which is 0.0 when nothing survives
     """
-    flat = np.asarray(p_values, dtype=float).ravel()
+    values = np.asarray(p_values, dtype=float)
+    if mask is None:
+        flat = values.ravel()
+    else:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != values.shape:
+            raise ValueError(
+                f"mask shape {mask.shape} does not match p_values shape {values.shape}"
+            )
+        flat = values[mask]
+
     n = flat.size
+    if n == 0:
+        return np.zeros(values.shape, dtype=bool), 0.0
     order = np.argsort(flat, kind="mergesort")
     ranked = flat[order]
 
     # the largest k for which p_(k) <= alpha * k / n sets the cutoff
     passes = ranked <= alpha * np.arange(1, n + 1) / n
     if not passes.any():
-        return np.zeros_like(p_values, dtype=bool), 0.0
+        return np.zeros(values.shape, dtype=bool), 0.0
 
     threshold = float(ranked[np.flatnonzero(passes)[-1]])
-    return np.asarray(p_values, dtype=float) <= threshold, threshold
+    significant = values <= threshold
+    if mask is not None:
+        significant &= mask
+    return significant, threshold
 
 
 def surrogate_test(
@@ -223,8 +247,10 @@ def surrogate_test(
     p_values = (at_least_as_extreme + 1.0) / (n_surrogates + 1.0)
     np.fill_diagonal(p_values, 1.0)
 
-    significant, threshold = benjamini_hochberg(p_values, alpha)
-    np.fill_diagonal(significant, False)
+    # the diagonal is self-pairs, not hypotheses; exclude it so the family size
+    # is m*(m-1), not m**2 (which would stiffen the correction by m/(m-1)).
+    off_diagonal = ~np.eye(p_values.shape[0], dtype=bool)
+    significant, threshold = benjamini_hochberg(p_values, alpha, mask=off_diagonal)
 
     return SignificanceResult(
         dPTE=dPTE,
@@ -362,8 +388,10 @@ def group_test(
 
     centred = samples - reference
     statistic, p_values = _pairwise_test(centred, method)
-    significant, threshold = benjamini_hochberg(p_values, alpha)
-    np.fill_diagonal(significant, False)
+    # the diagonal is self-pairs, not hypotheses; exclude it so the family size
+    # is m*(m-1), not m**2 (which would stiffen the correction by m/(m-1)).
+    off_diagonal = ~np.eye(p_values.shape[0], dtype=bool)
+    significant, threshold = benjamini_hochberg(p_values, alpha, mask=off_diagonal)
 
     return GroupResult(
         statistic=statistic,
@@ -416,8 +444,10 @@ def group_contrast(
 
     difference = a - b
     statistic, p_values = _pairwise_test(difference, method)
-    significant, threshold = benjamini_hochberg(p_values, alpha)
-    np.fill_diagonal(significant, False)
+    # the diagonal is self-pairs, not hypotheses; exclude it so the family size
+    # is m*(m-1), not m**2 (which would stiffen the correction by m/(m-1)).
+    off_diagonal = ~np.eye(p_values.shape[0], dtype=bool)
+    significant, threshold = benjamini_hochberg(p_values, alpha, mask=off_diagonal)
 
     return GroupResult(
         statistic=statistic,
