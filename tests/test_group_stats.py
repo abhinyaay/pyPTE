@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from pyPTE import PTE, cluster_permutation, group_contrast, group_test
+from pyPTE.stats import benjamini_hochberg
 
 FS = 250.0
 
@@ -79,6 +80,48 @@ def test_diagonal_is_never_significant():
 
     assert not np.diag(result.significant).any()
     np.testing.assert_array_equal(np.diag(result.p_values), 1.0)
+
+
+def _one_pair_group(caller):
+    """A 5-channel group where only the (1, 3) pair carries an effect.
+
+    The effect is tuned so its t-test p-value (0.0044) lands between the rank-2
+    Benjamini-Hochberg cutoffs for a family of m*(m-1)=20 (its real size) and
+    m**2=25 (what counting the all-p=1 diagonal would give). It therefore
+    survives only when the diagonal is excluded from the family.
+    """
+    m = 5
+    column = np.linspace(0.2, 1.0, 6)[:, None, None]
+    effect = np.zeros((6, m, m))
+    effect[:, 1, 3] = effect[:, 3, 1] = column[:, 0, 0]
+    if caller is group_contrast:
+        return group_contrast(effect, np.zeros_like(effect), method="ttest")
+    return group_test(effect, reference=0.0, method="ttest")
+
+
+@pytest.mark.parametrize("caller", [group_test, group_contrast])
+def test_diagonal_is_excluded_from_the_fdr_family(caller):
+    """The diagonal is self-pairs, so it must not count toward the FDR family.
+
+    Counting its five p=1 entries would push the family from 20 to 25 and bury
+    the one real pair below the Benjamini-Hochberg cutoff. The callers now pass
+    an off-diagonal mask, so the result matches an off-diagonal correction and
+    not the whole-matrix one.
+    """
+    result = _one_pair_group(caller)
+    off_diagonal = ~np.eye(result.significant.shape[0], dtype=bool)
+
+    assert result.significant[1, 3] and result.significant[3, 1]
+
+    masked, masked_threshold = benjamini_hochberg(
+        result.p_values, 0.05, mask=off_diagonal
+    )
+    np.testing.assert_array_equal(result.significant, masked)
+    assert result.threshold == masked_threshold
+
+    # counting the diagonal (the old behaviour) would have found nothing
+    whole_matrix, _ = benjamini_hochberg(result.p_values, 0.05)
+    assert not whole_matrix.any()
 
 
 def test_group_test_rejects_bad_input():

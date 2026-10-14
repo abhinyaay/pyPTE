@@ -71,6 +71,47 @@ def test_bh_preserves_shape():
     assert significant.shape == (6, 6)
 
 
+def test_bh_mask_excludes_the_diagonal_from_the_family_size():
+    """The diagonal is self-pairs, not hypotheses.
+
+    On a 5x5 matrix the diagonal's five p=1 entries push the family size from
+    m*(m-1)=20 to m**2=25, stiffening the rank-1/2 Benjamini-Hochberg cutoffs by
+    m/(m-1). A genuine pair at p=0.0045 sits between the two: it survives at
+    n=20 but is missed at n=25. Masking out the diagonal recovers it.
+    """
+    m = 5
+    p = np.ones((m, m))
+    p[1, 3] = p[3, 1] = 0.0045  # dPTE p-values are symmetric
+    off_diagonal = ~np.eye(m, dtype=bool)
+
+    significant, threshold = benjamini_hochberg(p, alpha=0.05, mask=off_diagonal)
+    assert significant[1, 3] and significant[3, 1], "the real pair must survive"
+    assert significant.sum() == 2
+    assert threshold == pytest.approx(0.0045)
+
+    # counting the diagonal (the old behaviour) misses it entirely
+    counting_diagonal, _ = benjamini_hochberg(p, alpha=0.05)
+    assert not counting_diagonal.any()
+
+
+def test_bh_mask_never_marks_masked_out_entries_significant():
+    """An entry outside the mask is excluded from the family and from the result,
+    even when its own p-value is tiny."""
+    p = np.full((4, 4), 0.9)
+    np.fill_diagonal(p, 1e-9)  # would be "significant" on its own merits
+    off_diagonal = ~np.eye(4, dtype=bool)
+
+    significant, _ = benjamini_hochberg(p, alpha=0.05, mask=off_diagonal)
+    assert not np.diag(significant).any()
+    assert not significant.any(), "nothing off-diagonal is small, so nothing survives"
+
+
+def test_bh_mask_shape_must_match():
+    p = np.full((4, 4), 0.5)
+    with pytest.raises(ValueError, match="mask shape"):
+        benjamini_hochberg(p, mask=np.ones((3, 3), dtype=bool))
+
+
 # --------------------------------------------------------------------------
 # surrogates
 # --------------------------------------------------------------------------
